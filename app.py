@@ -30,6 +30,14 @@ def notify_telegram(name: str, phone: str, country: str) -> None:
 
 app = Flask(__name__, static_folder=".", static_url_path="")
 app.secret_key = os.environ.get("SECRET_KEY", "dev-only-insecure-key")
+app.config["MAX_CONTENT_LENGTH"] = 10 * 1024 * 1024  # 10 MB
+
+ALLOWED_DOC_TYPES = {
+    "application/pdf",
+    "image/jpeg",
+    "image/png",
+    "image/heic",
+}
 
 CHECKLIST_TEMPLATE = """
 <!DOCTYPE html>
@@ -132,7 +140,12 @@ LOGIN_TEMPLATE = """
 DASHBOARD_TEMPLATE = """
 <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>Личный кабинет — VizaOson</title><style>{{ style }}</style></head><body>
+<title>Личный кабинет — VizaOson</title><style>{{ style }}
+  .doc-row { display: flex; justify-content: space-between; align-items: center; background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px 14px; margin-bottom: 8px; font-size: 14px; }
+  .doc-row a { color: var(--blue); text-decoration: none; font-weight: 600; }
+  .doc-del { color: #c0392b; font-size: 13px; text-decoration: none; margin-left: 12px; }
+  .upload-form { margin-top: 14px; display: flex; gap: 10px; align-items: center; }
+</style></head><body>
 <div class="container" style="max-width:640px">
   <a href="/logout" class="logout">Выйти</a>
   <h1>Здравствуйте, {{ user_name }}</h1>
@@ -147,7 +160,58 @@ DASHBOARD_TEMPLATE = """
   {% else %}
   <div class="empty">Пока нет заявок — оставьте новую на <a href="/#contact">главной странице</a>, она автоматически привяжется к вашему аккаунту.</div>
   {% endif %}
-</div></body></html>
+
+  <h1 style="margin-top:36px; font-size:20px;">Мои документы</h1>
+  {% if documents %}
+    {% for doc in documents %}
+    <div class="doc-row">
+      <a href="/documents/{{ doc.id }}" target="_blank">{{ doc.filename }}</a>
+      <span style="color:var(--muted)">
+        {{ (doc.size / 1024) | round(1) }} КБ
+        <a href="#" class="doc-del" onclick="deleteDoc({{ doc.id }}); return false;">удалить</a>
+      </span>
+    </div>
+    {% endfor %}
+  {% else %}
+  <div class="empty">Документов пока нет.</div>
+  {% endif %}
+
+  <form class="upload-form" id="upload-form">
+    <input type="file" id="doc-file" accept=".pdf,.jpg,.jpeg,.png,.heic" required>
+    <button class="btn" type="submit">Загрузить</button>
+  </form>
+  <div id="upload-message" style="font-size:13px; margin-top:8px;"></div>
+</div>
+<script>
+  document.getElementById('upload-form').addEventListener('submit', async function (e) {
+    e.preventDefault();
+    var fileInput = document.getElementById('doc-file');
+    var msg = document.getElementById('upload-message');
+    if (!fileInput.files.length) return;
+    var formData = new FormData();
+    formData.append('file', fileInput.files[0]);
+    msg.textContent = 'Загружаем...';
+    msg.style.color = 'var(--muted)';
+    try {
+      var res = await fetch('/api/documents', { method: 'POST', body: formData });
+      var body = await res.json();
+      if (!res.ok) throw new Error(body.error || 'upload failed');
+      msg.style.color = '#1a9e5c';
+      msg.textContent = 'Загружено!';
+      setTimeout(function () { location.reload(); }, 700);
+    } catch (err) {
+      msg.style.color = '#c0392b';
+      msg.textContent = 'Ошибка загрузки: ' + err.message;
+    }
+  });
+
+  async function deleteDoc(id) {
+    if (!confirm('Удалить документ?')) return;
+    await fetch('/api/documents/' + id, { method: 'DELETE' });
+    location.reload();
+  }
+</script>
+</body></html>
 """
 
 SCHEMA = """
@@ -166,6 +230,15 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE visa_leads ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+CREATE TABLE IF NOT EXISTS documents (
+    id SERIAL PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    filename TEXT NOT NULL,
+    content_type TEXT NOT NULL,
+    data BYTEA NOT NULL,
+    size INTEGER NOT NULL,
+    created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+);
 """
 
 _pool: pool.ThreadedConnectionPool | None = None
@@ -322,10 +395,93 @@ def dashboard():
             )
             cols = [d[0] for d in cur.description]
             leads = [dict(zip(cols, row)) for row in cur.fetchall()]
+
+            cur.execute(
+                "SELECT id, filename, size FROM documents WHERE user_id = %s ORDER BY id DESC",
+                (session["user_id"],),
+            )
+            cols = [d[0] for d in cur.description]
+            documents = [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         get_pool().putconn(conn)
 
-    return render_template_string(DASHBOARD_TEMPLATE, style=AUTH_BASE_STYLE, user_name=session["user_name"], leads=leads)
+    return render_template_string(
+        DASHBOARD_TEMPLATE, style=AUTH_BASE_STYLE, user_name=session["user_name"], leads=leads, documents=documents
+    )
+
+
+@app.route("/api/documents", methods=["POST"])
+def upload_document():
+    if "user_id" not in session:
+        return jsonify({"error": "unauthorized"}), 401
+
+    file = request.files.get("file")
+    if file is None or not file.filename:
+        return jsonify({"error": "Файл не передан"}), 400
+
+    content_type = file.content_type or "application/octet-stream"
+    if content_type not in ALLOWED_DOC_TYPES:
+        return jsonify({"error": "Разрешены только PDF, JPG, PNG, HEIC"}), 400
+
+    data = file.read()
+    if not data:
+        return jsonify({"error": "Пустой файл"}), 400
+
+    conn = get_pool().getconn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "INSERT INTO documents (user_id, filename, content_type, data, size) VALUES (%s, %s, %s, %s, %s) RETURNING id",
+                (session["user_id"], file.filename, content_type, data, len(data)),
+            )
+            doc_id = cur.fetchone()[0]
+    finally:
+        get_pool().putconn(conn)
+
+    return jsonify({"ok": True, "id": doc_id}), 201
+
+
+@app.route("/documents/<int:doc_id>")
+def download_document(doc_id: int):
+    if "user_id" not in session:
+        return redirect(url_for("login"))
+
+    conn = get_pool().getconn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute(
+                "SELECT filename, content_type, data FROM documents WHERE id = %s AND user_id = %s",
+                (doc_id, session["user_id"]),
+            )
+            row = cur.fetchone()
+    finally:
+        get_pool().putconn(conn)
+
+    if row is None:
+        abort(404)
+
+    filename, content_type, data = row
+    return app.response_class(
+        bytes(data), mimetype=content_type, headers={"Content-Disposition": f'inline; filename="{filename}"'}
+    )
+
+
+@app.route("/api/documents/<int:doc_id>", methods=["DELETE"])
+def delete_document(doc_id: int):
+    if "user_id" not in session:
+        return jsonify({"error": "unauthorized"}), 401
+
+    conn = get_pool().getconn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("DELETE FROM documents WHERE id = %s AND user_id = %s", (doc_id, session["user_id"]))
+            deleted = cur.rowcount
+    finally:
+        get_pool().putconn(conn)
+
+    if not deleted:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"ok": True})
 
 
 if __name__ == "__main__":
