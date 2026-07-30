@@ -2,10 +2,53 @@ from __future__ import annotations
 
 import os
 
-from flask import Flask, jsonify, request, send_from_directory
+from flask import Flask, abort, jsonify, render_template_string, request, send_from_directory
 from psycopg2 import pool
 
+from checklists import CHECKLISTS
+
 app = Flask(__name__, static_folder=".", static_url_path="")
+
+CHECKLIST_TEMPLATE = """
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>{{ data.title }} — чек-лист документов | VizaOson</title>
+<style>
+  :root { --blue: #2554c7; --blue-dark: #1a3d94; --ink: #14213d; --muted: #5b6478; --bg: #f7f9fc; --card: #ffffff; --border: #e4e8f0; }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif; background: var(--bg); color: var(--ink); line-height: 1.55; }
+  .container { max-width: 720px; margin: 0 auto; padding: 48px 24px; }
+  a.back { color: var(--blue); text-decoration: none; font-size: 14px; font-weight: 600; }
+  h1 { font-size: 28px; margin: 16px 0 6px; letter-spacing: -0.02em; }
+  .flag { font-size: 40px; }
+  ul { list-style: none; margin-top: 24px; }
+  li { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 18px; margin-bottom: 10px; font-size: 15px; display: flex; gap: 10px; }
+  li::before { content: "☐"; color: var(--blue); font-size: 18px; flex-shrink: 0; }
+  .note { margin-top: 24px; background: #eaf0ff; border: 1px dashed var(--blue); border-radius: 12px; padding: 16px; font-size: 14px; color: var(--blue-dark); }
+  .cta { display: inline-block; margin-top: 28px; background: var(--blue); color: #fff; padding: 13px 24px; border-radius: 10px; font-weight: 600; text-decoration: none; }
+  .cta:hover { background: var(--blue-dark); }
+</style>
+</head>
+<body>
+<div class="container">
+  <a href="/" class="back">← На главную</a>
+  <div class="flag">{{ data.flag }}</div>
+  <h1>{{ data.title }}</h1>
+  <p style="color:var(--muted)">Примерный список документов — актуальный список для вашей ситуации уточним на консультации.</p>
+  <ul>
+    {% for item in data.documents %}
+    <li>{{ item }}</li>
+    {% endfor %}
+  </ul>
+  <div class="note">⚠️ {{ data.note }}</div>
+  <a href="/#contact" class="cta">Записаться на консультацию</a>
+</div>
+</body>
+</html>
+"""
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS visa_leads (
@@ -36,6 +79,14 @@ def get_pool() -> pool.ThreadedConnectionPool:
 @app.route("/")
 def index():
     return send_from_directory(".", "index.html")
+
+
+@app.route("/checklist/<country>")
+def checklist(country: str):
+    data = CHECKLISTS.get(country)
+    if data is None:
+        abort(404)
+    return render_template_string(CHECKLIST_TEMPLATE, data=data)
 
 
 @app.route("/api/lead", methods=["POST"])
