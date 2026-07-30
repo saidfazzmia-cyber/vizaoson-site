@@ -324,10 +324,10 @@
         ✈️ Написать в Telegram
       </a>
     </div>
-    <form onsubmit="return false;">
-      <input type="text" placeholder="Ваше имя" required>
-      <input type="tel" placeholder="Телефон" required>
-      <select required>
+    <form id="lead-form">
+      <input type="text" id="lead-name" placeholder="Ваше имя" required>
+      <input type="tel" id="lead-phone" placeholder="Телефон" required>
+      <select id="lead-country" required>
         <option value="" disabled selected>Направление</option>
         <option>Шенген</option>
         <option>США</option>
@@ -335,8 +335,42 @@
         <option>ОАЭ</option>
         <option>Другое</option>
       </select>
-      <button type="submit" class="btn">Отправить заявку</button>
+      <button type="submit" class="btn" id="lead-submit">Отправить заявку</button>
+      <div id="lead-message" style="font-size:14px; margin-top:4px;"></div>
     </form>
+    <script>
+      document.getElementById('lead-form').addEventListener('submit', async function (e) {
+        e.preventDefault();
+        var btn = document.getElementById('lead-submit');
+        var msg = document.getElementById('lead-message');
+        var payload = {
+          name: document.getElementById('lead-name').value,
+          phone: document.getElementById('lead-phone').value,
+          country: document.getElementById('lead-country').value,
+        };
+        btn.disabled = true;
+        btn.textContent = 'Отправляем...';
+        msg.style.color = 'var(--muted)';
+        msg.textContent = '';
+        try {
+          var res = await fetch('/api/lead', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(payload),
+          });
+          if (!res.ok) throw new Error('bad response');
+          msg.style.color = '#1a9e5c';
+          msg.textContent = 'Заявка отправлена! Мы свяжемся с вами в течение дня.';
+          document.getElementById('lead-form').reset();
+        } catch (err) {
+          msg.style.color = '#c0392b';
+          msg.textContent = 'Не удалось отправить. Попробуйте написать в Telegram выше.';
+        } finally {
+          btn.disabled = false;
+          btn.textContent = 'Отправить заявку';
+        }
+      });
+    </script>
   </div>
 </section>
 
