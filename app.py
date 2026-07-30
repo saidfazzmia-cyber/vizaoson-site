@@ -1,11 +1,31 @@
 from __future__ import annotations
 
+import logging
 import os
 
+import httpx
 from flask import Flask, abort, jsonify, render_template_string, request, send_from_directory
 from psycopg2 import pool
 
 from checklists import CHECKLISTS
+
+logger = logging.getLogger("vizaoson")
+
+
+def notify_telegram(name: str, phone: str, country: str) -> None:
+    token = os.environ.get("TELEGRAM_BOT_TOKEN")
+    chat_id = os.environ.get("TELEGRAM_NOTIFY_CHAT_ID")
+    if not token or not chat_id:
+        return
+    text = f"📩 Новая заявка VizaOson\nИмя: {name}\nТелефон: {phone}\nНаправление: {country}"
+    try:
+        httpx.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text},
+            timeout=10,
+        )
+    except Exception:
+        logger.exception("Failed to send Telegram notification")
 
 app = Flask(__name__, static_folder=".", static_url_path="")
 
@@ -109,6 +129,8 @@ def create_lead():
             lead_id = cur.fetchone()[0]
     finally:
         get_pool().putconn(conn)
+
+    notify_telegram(name, phone, country)
 
     return jsonify({"ok": True, "id": lead_id}), 201
 
