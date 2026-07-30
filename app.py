@@ -230,6 +230,8 @@ CREATE TABLE IF NOT EXISTS users (
     created_at TIMESTAMPTZ NOT NULL DEFAULT now()
 );
 ALTER TABLE visa_leads ADD COLUMN IF NOT EXISTS user_id INTEGER REFERENCES users(id);
+ALTER TABLE visa_leads ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'new';
+ALTER TABLE visa_leads ADD COLUMN IF NOT EXISTS notes TEXT;
 CREATE TABLE IF NOT EXISTS documents (
     id SERIAL PRIMARY KEY,
     user_id INTEGER NOT NULL REFERENCES users(id),
@@ -315,6 +317,15 @@ def create_lead():
     return jsonify({"ok": True, "id": lead_id}), 201
 
 
+LEAD_STATUSES = {
+    "new": "🆕 Новая",
+    "contacted": "📞 Связались",
+    "in_progress": "⏳ В работе",
+    "done": "✅ Готово",
+    "rejected": "❌ Отказ",
+}
+
+
 @app.route("/api/leads", methods=["GET"])
 def list_leads():
     token = request.args.get("token")
@@ -324,13 +335,37 @@ def list_leads():
     conn = get_pool().getconn()
     try:
         with conn, conn.cursor() as cur:
-            cur.execute("SELECT id, name, phone, country, created_at FROM visa_leads ORDER BY id DESC")
+            cur.execute("SELECT id, name, phone, country, status, notes, created_at FROM visa_leads ORDER BY id DESC")
             cols = [d[0] for d in cur.description]
             rows = [dict(zip(cols, row)) for row in cur.fetchall()]
     finally:
         get_pool().putconn(conn)
 
     return jsonify(rows)
+
+
+@app.route("/api/leads/<int:lead_id>/status", methods=["POST"])
+def update_lead_status(lead_id: int):
+    token = request.args.get("token") or (request.get_json(silent=True) or {}).get("token")
+    if token != os.environ.get("ADMIN_TOKEN"):
+        return jsonify({"error": "unauthorized"}), 401
+
+    data = request.get_json(silent=True) or {}
+    status = data.get("status")
+    if status not in LEAD_STATUSES:
+        return jsonify({"error": "invalid status"}), 400
+
+    conn = get_pool().getconn()
+    try:
+        with conn, conn.cursor() as cur:
+            cur.execute("UPDATE visa_leads SET status = %s WHERE id = %s", (status, lead_id))
+            updated = cur.rowcount
+    finally:
+        get_pool().putconn(conn)
+
+    if not updated:
+        return jsonify({"error": "not found"}), 404
+    return jsonify({"ok": True})
 
 
 ADMIN_TEMPLATE = """
@@ -341,8 +376,9 @@ ADMIN_TEMPLATE = """
   .stat { background: var(--card); border: 1px solid var(--border); border-radius: 12px; padding: 16px 20px; flex: 1; }
   .stat .num { font-size: 28px; font-weight: 800; color: var(--blue-dark); }
   .stat .label { font-size: 13px; color: var(--muted); }
+  select.status-select { padding: 6px 8px; border-radius: 8px; border: 1.5px solid var(--border); font-size: 13px; font-family: inherit; background: var(--bg); }
 </style></head><body>
-<div class="container" style="max-width:840px">
+<div class="container" style="max-width:900px">
   <h1>Админ-панель VizaOson</h1>
   <div class="stats">
     <div class="stat"><div class="num">{{ leads|length }}</div><div class="label">Заявок всего</div></div>
@@ -351,11 +387,18 @@ ADMIN_TEMPLATE = """
   <h2 style="font-size:18px; margin-bottom:10px;">Заявки</h2>
   {% if leads %}
   <table>
-    <tr><th>#</th><th>Имя</th><th>Телефон</th><th>Направление</th><th>Аккаунт</th><th>Дата</th></tr>
+    <tr><th>#</th><th>Имя</th><th>Телефон</th><th>Направление</th><th>Аккаунт</th><th>Дата</th><th>Статус</th></tr>
     {% for lead in leads %}
     <tr>
       <td>{{ lead.id }}</td><td>{{ lead.name }}</td><td>{{ lead.phone }}</td><td>{{ lead.country }}</td>
       <td>{{ lead.email or "—" }}</td><td>{{ lead.created_at }}</td>
+      <td>
+        <select class="status-select" onchange="updateStatus({{ lead.id }}, this.value)">
+          {% for code, label in statuses.items() %}
+          <option value="{{ code }}" {% if lead.status == code %}selected{% endif %}>{{ label }}</option>
+          {% endfor %}
+        </select>
+      </td>
     </tr>
     {% endfor %}
   </table>
@@ -370,7 +413,18 @@ ADMIN_TEMPLATE = """
     {% endfor %}
   </table>
   {% else %}<div class="empty">Пользователей пока нет.</div>{% endif %}
-</div></body></html>
+</div>
+<script>
+  var TOKEN = {{ token|tojson }};
+  async function updateStatus(id, status) {
+    await fetch('/api/leads/' + id + '/status?token=' + encodeURIComponent(TOKEN), {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ status: status }),
+    });
+  }
+</script>
+</body></html>
 """
 
 
@@ -385,7 +439,7 @@ def admin_panel():
         with conn, conn.cursor() as cur:
             cur.execute(
                 """
-                SELECT l.id, l.name, l.phone, l.country, l.created_at, u.email
+                SELECT l.id, l.name, l.phone, l.country, l.status, l.created_at, u.email
                 FROM visa_leads l LEFT JOIN users u ON u.id = l.user_id
                 ORDER BY l.id DESC
                 """
@@ -399,7 +453,9 @@ def admin_panel():
     finally:
         get_pool().putconn(conn)
 
-    return render_template_string(ADMIN_TEMPLATE, style=AUTH_BASE_STYLE, leads=leads, users=users)
+    return render_template_string(
+        ADMIN_TEMPLATE, style=AUTH_BASE_STYLE, leads=leads, users=users, statuses=LEAD_STATUSES, token=token
+    )
 
 
 @app.route("/register", methods=["GET", "POST"])
